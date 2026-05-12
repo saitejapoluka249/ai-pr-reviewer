@@ -2,6 +2,7 @@ import os
 from typing import TypedDict
 from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.memory import MemorySaver # NEW: For Human-in-the-loop memory
 from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
 
@@ -20,7 +21,7 @@ class AgentState(TypedDict):
     fix_attempts: int
     status: str # "PASS", "FAIL"
 
-# NEW: Define the expected structured JSON output for fixes
+# Define the expected structured JSON output for fixes
 class FixResponse(BaseModel):
     file_path: str = Field(description="The exact relative path of the file to fix (e.g., mcp-test-repo/calc.py)")
     code: str = Field(description="The complete, fully fixed code to overwrite the file")
@@ -30,26 +31,25 @@ llm = ChatOpenAI(model="gpt-4o", temperature=0)
 # 2. Define the Nodes (The steps the AI takes)
 
 def fetch_pr_node(state: AgentState):
-    print("--- [NODE] FETCHING PR DIFF ---")
+    print("\n--- [NODE] FETCHING PR DIFF ---")
     diff = get_pr_diff(state['repo_name'], state['pr_number'])
     return {"diff": diff}
 
 def analyze_code_node(state: AgentState):
-    print("--- [NODE] ANALYZING CODE ---")
+    print("\n--- [NODE] ANALYZING CODE ---")
     prompt = f"Analyze this diff for bugs. If there's a bug, explain it. Diff:\n{state['diff']}"
     response = llm.invoke(prompt)
     return {"analysis": response.content}
 
 def test_code_node(state: AgentState):
-    print("--- [NODE] RUNNING TESTS ---")
+    print("\n--- [NODE] RUNNING TESTS ---")
     results = run_pytest()
     status = "FAIL" if "FAILED" in results else "PASS"
     return {"test_results": results, "status": status}
 
 def fix_code_node(state: AgentState):
-    print(f"--- [NODE] FIXING CODE (Attempt {state.get('fix_attempts', 0) + 1}) ---")
+    print(f"\n--- [NODE] FIXING CODE (Attempt {state.get('fix_attempts', 0) + 1}) ---")
     
-    # NEW: Bind the LLM to the Pydantic model to guarantee a structured JSON response
     structured_llm = llm.with_structured_output(FixResponse)
     
     prompt = f"""Tests failed:
@@ -58,17 +58,15 @@ def fix_code_node(state: AgentState):
 Based on the failed tests and the initial diff, identify which file needs to be fixed.
 Provide the exact file path and the full, corrected code to overwrite it."""
     
-    # Invoke now returns a validated FixResponse object instead of a raw text string
     response = structured_llm.invoke(prompt)
     
-    # Dynamically pass the AI-selected file path to the MCP tool
     print(f"--- AI chose to fix: {response.file_path} ---")
     write_to_file(response.file_path, response.code)
     
     return {"fix_attempts": state.get('fix_attempts', 0) + 1}
 
 def comment_node(state: AgentState):
-    print("--- [NODE] POSTING COMMENT ---")
+    print("\n--- [NODE] POSTING COMMENT ---")
     msg = f"AI Review: {state['status']}\n\nAnalysis: {state['analysis']}"
     post_github_comment(state['repo_name'], state['pr_number'], msg)
     return {"status": "DONE"}
@@ -97,13 +95,55 @@ workflow.add_conditional_edges("test", route_after_test, {"comment": "comment", 
 workflow.add_edge("fix", "test")
 workflow.add_edge("comment", END)
 
-app = workflow.compile()
+# NEW: Add a Checkpointer (Memory) to allow pausing the graph mid-execution
+memory = MemorySaver()
+
+# NEW: Compile the graph but tell it to PAUSE before running "fix" or "comment"
+app = workflow.compile(
+    checkpointer=memory,
+    interrupt_before=["fix", "comment"]
+)
 
 # 4. Execution
 if __name__ == "__main__":
+    # A thread_id is required for memory to know which conversation/run this is
+    thread_config = {"configurable": {"thread_id": "pr-review-run-1"}}
+    
     inputs = {
         "repo_name": "saitejapoluka249/mcp-test-repo", 
         "pr_number": 2,                               
         "fix_attempts": 0
     }
-    app.invoke(inputs)
+    
+    print("Starting AI Reviewer...")
+    
+    # Stream the graph until it hits a breakpoint
+    for event in app.stream(inputs, config=thread_config):
+        pass # The nodes themselves print their status
+        
+    # Check where the graph paused
+    snapshot = app.get_state(thread_config)
+    next_steps = snapshot.next
+    
+    # While there are still nodes waiting for approval
+    while next_steps:
+        node_to_run = next_steps[0]
+        
+        # Ask the human for permission
+        print(f"\n⚠️  [HUMAN APPROVAL REQUIRED] ⚠️")
+        user_input = input(f"The AI wants to proceed to the '{node_to_run}' step. Allow? (y/n): ")
+        
+        if user_input.strip().lower() == 'y':
+            print(f"--- Proceeding with '{node_to_run}' ---")
+            
+            # Resume execution by passing None (it picks up exactly where it paused in memory)
+            for event in app.stream(None, config=thread_config):
+                pass
+            
+            # Check the state again to see if it paused at a new node 
+            # (e.g., it ran 'fix', then 'test', and is now paused at 'comment')
+            snapshot = app.get_state(thread_config)
+            next_steps = snapshot.next
+        else:
+            print("--- 🛑 Execution stopped by human. ---")
+            break
