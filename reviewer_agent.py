@@ -6,8 +6,8 @@ from langgraph.checkpoint.memory import MemorySaver
 from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
 
-# Import the new setup_workspace tool
-from mcp_server import get_pr_diff, run_pytest, post_github_comment, write_to_file, read_local_file, setup_workspace
+# Import the new push_fixed_code tool
+from mcp_server import get_pr_diff, run_pytest, post_github_comment, write_to_file, read_local_file, setup_workspace, push_fixed_code
 
 load_dotenv()
 
@@ -35,8 +35,6 @@ llm = ChatOpenAI(model="gpt-4o", temperature=0)
 
 def fetch_pr_node(state: AgentState):
     print("\n--- [NODE] PREPARING WORKSPACE & FETCHING PR ---")
-    
-    # NEW: Automatically download the target repo and specific PR!
     setup_status = setup_workspace(state['repo_name'], state['pr_number'])
     print(f"--- {setup_status} ---")
     
@@ -51,8 +49,6 @@ def analyze_code_node(state: AgentState):
 
 def test_code_node(state: AgentState):
     print("\n--- [NODE] RUNNING TESTS ---")
-    
-    # Pass the repo name dynamically so pytest knows where to look
     results = run_pytest(state['repo_name'])
     print(f"Test Output:\n{results}") 
     
@@ -66,7 +62,7 @@ def test_code_node(state: AgentState):
 
 def gather_context_node(state: AgentState):
     print("\n--- [NODE] PRE-FIX INVESTIGATION (Reading Files) ---")
-    repo_dir = state['repo_name'].split('/')[-1] # Dynamically get the folder name
+    repo_dir = state['repo_name'].split('/')[-1] 
     structured_llm = llm.with_structured_output(ContextRequest)
     
     prompt = f"""Tests failed:
@@ -110,15 +106,26 @@ Provide the exact file path (starting with {repo_dir}/) and the full, corrected 
     return {"fix_attempts": state.get('fix_attempts', 0) + 1}
 
 def comment_node(state: AgentState):
-    print("\n--- [NODE] POSTING COMMENT ---")
+    print("\n--- [NODE] FINALIZING REVIEW & SYNCING ---")
     
-    # If the AI had to fix the code, change the message to explain that!
-    if state.get('fix_attempts', 0) > 0:
-        msg = f"✅ **AI Review: AUTONOMOUSLY FIXED & PASSED**\n\n"
-        msg += f"*Note: The initial code failed tests, but the AI applied {state['fix_attempts']} fix attempt(s) to resolve the issue.*\n\n"
+    # NEW: If the AI fixed the code AND it passed, push it to GitHub!
+    if state.get('fix_attempts', 0) > 0 and state['status'] == "PASS":
+        print("--- Pushing fixed code to GitHub ---")
+        push_status = push_fixed_code(state['repo_name'], state['pr_number'], "🤖 AI Auto-Fix: Resolved failing tests")
+        print(f"--- {push_status} ---")
+        
+        msg = f"✅ **AI Review: AUTONOMOUSLY FIXED & PUSHED**\n\n"
+        msg += f"*Note: The initial code failed tests, but the AI applied a fix and pushed it directly to this Pull Request.*\n\n"
         msg += f"**Original Bug Analysis:**\n{state['analysis']}"
+        
+    # If the AI tried to fix it but still failed
+    elif state.get('fix_attempts', 0) > 0 and state['status'] == "FAIL":
+        msg = f"❌ **AI Review: FAILED TO FIX**\n\n"
+        msg += f"*Note: The AI attempted to fix the code {state['fix_attempts']} times, but the tests are still failing. Human intervention required.*\n\n"
+        msg += f"**Original Bug Analysis:**\n{state['analysis']}"
+        
+    # If the code passed on the very first try without needing fixes
     else:
-        # If it passed on the first try without fixes
         msg = f"✅ **AI Review: {state['status']}**\n\n**Analysis:**\n{state['analysis']}"
         
     post_github_comment(state['repo_name'], state['pr_number'], msg)
@@ -160,10 +167,9 @@ app = workflow.compile(
 if __name__ == "__main__":
     thread_config = {"configurable": {"thread_id": "pr-review-run-1"}}
     
-    # You can now change this to ANY repository and PR number!
     inputs = {
         "repo_name": "saitejapoluka249/mcp-test-repo", 
-        "pr_number": 2,                               
+        "pr_number": 1,                               
         "fix_attempts": 0
     }
     
