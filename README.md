@@ -1,26 +1,29 @@
-# 🤖 Autonomous GitHub PR Reviewer & Tester
+# 🤖 Autonomous GitHub PR Reviewer & Tester (Hybrid Agent)
 
-An enterprise-grade **Agentic AI** system that automates the entire code review and testing lifecycle. Built with **LangGraph** and **Model Context Protocol (MCP)**, this agent doesn't just point out bugs—it dynamically clones repositories, investigates failures by reading source files, applies self-healing fixes across multiple files, and pushes the verified code back to GitHub.
+An enterprise-grade **Agentic AI** system that automates the entire code review and testing lifecycle. Built with **LangGraph** and **Model Context Protocol (MCP)**, this agent acts as both a Senior Code Reviewer and an Automated QA Tester.
+
+It dynamically clones repositories, reads source code to enforce style and logic, triggers local test suites, applies self-healing fixes across multiple files, and pushes the verified code back to GitHub.
 
 ---
 
-## 🏛️ System Architecture
+## 🏛️ System Architecture: The Hybrid Approach
 
-This system operates as a circular state machine, allowing for continuous feedback loops between testing and fixing.
+This system operates as a circular state machine using a **Hybrid Review Architecture** (Static Analysis + Dynamic Execution).
 
 ### The "Brain" (LangGraph & LangChain)
 
-The orchestration layer manages the **AgentState**, a short-term memory that tracks git diffs, real-time `pytest` logs, and fix attempts. It utilizes:
+The orchestration layer manages the **AgentState**, a short-term memory that tracks git diffs, file contents, real-time `pytest` logs, and static review feedback. It utilizes:
 
 - **Structured Outputs**: Using Pydantic models to ensure the AI returns exact JSON data for multi-file fixes and context requests.
-- **Human-in-the-Loop (HITL)**: Interactive checkpoints that pause execution for human approval before dangerous actions like writing code or posting public comments.
+- **Cyclical Self-Healing**: The graph loops through fixing and testing until both the static review and dynamic tests pass.
+- **Human-in-the-Loop (HITL)**: Interactive checkpoints that pause execution for human approval before dangerous actions like posting public comments or pushing code.
 
 ### The "Hands" (Model Context Protocol - MCP)
 
 MCP acts as the bridge between the AI and the local system, providing specialized tools to:
 
 - **Setup Workspace**: Dynamically clone any GitHub repository and checkout specific Pull Request branches.
-- **Investigate**: Read full contents of local files to understand bug context.
+- **Investigate**: Read full contents of local files to understand bug context and style.
 - **Execute**: Trigger local test suites via `pytest`.
 - **Sync**: Commit and push verified fixes directly back to the GitHub PR branch.
 
@@ -28,21 +31,24 @@ MCP acts as the bridge between the AI and the local system, providing specialize
 
 ## 🌟 Key Features
 
+- **Hybrid AI Review**: Combines Static Code Review (checking for bad variable names, missing comments, logic flaws) with Dynamic Testing (running `pytest`).
 - **Multi-File Self-Healing**: The agent can identify and fix bugs across multiple files in a single pass.
 - **Repository Agnostic**: Automatically handles workspace preparation for any repository and PR number provided.
-- **Closed-Loop Verification**: Fixes are only pushed if the local test suite passes.
+- **Closed-Loop Verification**: Code is only pushed back to GitHub if it passes _both_ the AI's strict static review and the local test suite.
 - **Automated Cleanliness**: Dynamically manages `.gitignore` to prevent pushing temporary system files like `__pycache__`.
 
 ---
 
 ## 🚀 Workflow Breakdown
 
-1. **Node: Fetch PR**: Dynamically clones the target repository and checks out the PR branch.
-2. **Node: Analyze**: GPT-4o reasons about the PR diff to identify logical pitfalls.
-3. **Node: Test**: Triggers a local `pytest` execution to verify code health.
-4. **Node: Gather Context**: If tests fail, the AI autonomously decides which files to read to debug the failure.
-5. **Node: Fix**: The agent generates code patches for one or more files and overwrites them locally.
-6. **Node: Comment & Sync**: Summarizes the journey, posts a public review to GitHub, and pushes the fixed code if tests pass.
+1. **Fetch PR**: Dynamically clones the target repository and checks out the PR branch.
+2. **Analyze Diff**: GPT-4o reasons about the initial PR diff to identify logical pitfalls.
+3. **Read Modified Files**: Ingests the full contents of the files touched in the PR.
+4. **Static Review**: The AI acts as a Senior Developer, grading the code for bugs, logic, and stylistic best practices.
+5. **Dynamic Test**: Triggers a local `pytest` execution to verify code health mathematically.
+6. **Gather Context (Conditional)**: If tests fail, the AI autonomously decides which _additional_ files to read to debug the failure.
+7. **Fix Code (Conditional)**: The agent generates code patches and overwrites the files locally to fix any test failures or static review feedback. Loops back to Step 3.
+8. **Comment & Sync**: Summarizes the journey, posts a public review to GitHub, and automatically commits and pushes the fixed code.
 
 ---
 
@@ -62,7 +68,7 @@ MCP acts as the bridge between the AI and the local system, providing specialize
 1. **Clone the Repository**
 
 ```bash
-git clone https://github.com/saitejapoluka249/ai-pr-reviewer.git
+git clone [https://github.com/saitejapoluka249/ai-pr-reviewer.git](https://github.com/saitejapoluka249/ai-pr-reviewer.git)
 cd ai-pr-reviewer
 
 ```
@@ -86,7 +92,7 @@ OPENAI_API_KEY=your_openai_api_key
 ```
 
 4. **Execution**
-   Update the `repo_name` and `pr_number` in `reviewer_agent.py` and run:
+   Update the `repo_name` and `pr_number` at the bottom of `reviewer_agent.py` and run:
 
 ```bash
 python3 reviewer_agent.py
