@@ -6,7 +6,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
 
-# Import the new push_fixed_code tool
+# Import tools from mcp_server.py
 from mcp_server import get_pr_diff, run_pytest, post_github_comment, write_to_file, read_local_file, setup_workspace, push_fixed_code
 
 load_dotenv()
@@ -25,9 +25,14 @@ class AgentState(TypedDict):
 class ContextRequest(BaseModel):
     files_to_read: list[str] = Field(description="List of exact file paths to read. Always prefix with the repo folder name.")
 
-class FixResponse(BaseModel):
+# NEW: Model for a single file change
+class SingleFileFix(BaseModel):
     file_path: str = Field(description="The exact relative path of the file to fix (including the repo folder prefix)")
     code: str = Field(description="The complete, fully fixed code to overwrite the file")
+
+# NEW: Updated model to handle multiple file fixes in one response
+class FixResponse(BaseModel):
+    fixes: list[SingleFileFix] = Field(description="A list of one or more file fixes required to resolve the issues.")
 
 llm = ChatOpenAI(model="gpt-4o", temperature=0)
 
@@ -72,7 +77,7 @@ Initial PR Diff:
 {state['diff']}
 
 The code is located inside the directory: {repo_dir}/
-Based on the error logs, what files do you need to read? Return their exact paths starting with {repo_dir}/"""
+Based on the error logs, what files do you need to read to understand ALL the bugs? Return their exact paths starting with {repo_dir}/"""
 
     response = structured_llm.invoke(prompt)
     
@@ -88,6 +93,7 @@ def fix_code_node(state: AgentState):
     repo_dir = state['repo_name'].split('/')[-1]
     structured_llm = llm.with_structured_output(FixResponse)
     
+    # Updated prompt to encourage multi-file awareness
     prompt = f"""Tests failed:
 {state['test_results']}
 
@@ -95,36 +101,34 @@ Here is the full context of the files you requested to read:
 {state.get('file_contents', 'No additional files read.')}
 
 The repository folder is: {repo_dir}/
-Identify the core file that contains the bug.
-Provide the exact file path (starting with {repo_dir}/) and the full, corrected code to overwrite it."""
+Identify ALL files that contain bugs. Provide a list of fixes.
+Each fix must include the exact file path (starting with {repo_dir}/) and the full, corrected code."""
     
     response = structured_llm.invoke(prompt)
     
-    print(f"--- AI chose to fix: {response.file_path} ---")
-    write_to_file(response.file_path, response.code)
+    # NEW: Loop through all fixes provided by the AI
+    for fix in response.fixes:
+        print(f"--- AI is fixing: {fix.file_path} ---")
+        write_to_file(fix.file_path, fix.code)
     
     return {"fix_attempts": state.get('fix_attempts', 0) + 1}
 
 def comment_node(state: AgentState):
     print("\n--- [NODE] FINALIZING REVIEW & SYNCING ---")
     
-    # NEW: If the AI fixed the code AND it passed, push it to GitHub!
     if state.get('fix_attempts', 0) > 0 and state['status'] == "PASS":
         print("--- Pushing fixed code to GitHub ---")
-        push_status = push_fixed_code(state['repo_name'], state['pr_number'], "🤖 AI Auto-Fix: Resolved failing tests")
+        push_status = push_fixed_code(state['repo_name'], state['pr_number'], "🤖 AI Auto-Fix: Resolved multiple failing tests")
         print(f"--- {push_status} ---")
         
         msg = f"✅ **AI Review: AUTONOMOUSLY FIXED & PUSHED**\n\n"
-        msg += f"*Note: The initial code failed tests, but the AI applied a fix and pushed it directly to this Pull Request.*\n\n"
+        msg += f"*Note: The initial code failed tests, but the AI applied fixes across multiple files and pushed them to the PR branch.*\n\n"
         msg += f"**Original Bug Analysis:**\n{state['analysis']}"
         
-    # If the AI tried to fix it but still failed
     elif state.get('fix_attempts', 0) > 0 and state['status'] == "FAIL":
         msg = f"❌ **AI Review: FAILED TO FIX**\n\n"
-        msg += f"*Note: The AI attempted to fix the code {state['fix_attempts']} times, but the tests are still failing. Human intervention required.*\n\n"
+        msg += f"*Note: The AI attempted to fix the code {state['fix_attempts']} times, but tests are still failing. Human intervention required.*\n\n"
         msg += f"**Original Bug Analysis:**\n{state['analysis']}"
-        
-    # If the code passed on the very first try without needing fixes
     else:
         msg = f"✅ **AI Review: {state['status']}**\n\n**Analysis:**\n{state['analysis']}"
         
@@ -165,11 +169,11 @@ app = workflow.compile(
 
 # 4. Execution
 if __name__ == "__main__":
-    thread_config = {"configurable": {"thread_id": "pr-review-run-1"}}
+    thread_config = {"configurable": {"thread_id": "multi-file-fix-run"}}
     
     inputs = {
         "repo_name": "saitejapoluka249/mcp-test-repo", 
-        "pr_number": 1,                               
+        "pr_number": 2, # Update to the PR you want to test                               
         "fix_attempts": 0
     }
     
@@ -183,18 +187,14 @@ if __name__ == "__main__":
     
     while next_steps:
         node_to_run = next_steps[0]
-        
         print(f"\n⚠️  [HUMAN APPROVAL REQUIRED] ⚠️")
-        user_input = input(f"The AI wants to proceed to the '{node_to_run}' step. Allow? (y/n): ")
+        user_input = input(f"The AI wants to proceed to '{node_to_run}'. Allow? (y/n): ")
         
         if user_input.strip().lower() == 'y':
-            print(f"--- Proceeding with '{node_to_run}' ---")
-            
             for event in app.stream(None, config=thread_config):
                 pass
-            
             snapshot = app.get_state(thread_config)
             next_steps = snapshot.next
         else:
-            print("--- 🛑 Execution stopped by human. ---")
+            print("--- 🛑 Execution stopped. ---")
             break
