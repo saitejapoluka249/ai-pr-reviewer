@@ -74,7 +74,7 @@ Using `TypedDict` and LangGraph's `StateGraph`, the system maintains a consisten
 1. **Clone the Repository**
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/ai-pr-reviewer.git
+git clone https://github.com/saitejapoluka249/ai-pr-reviewer.git
 cd ai-pr-reviewer
 
 ```
