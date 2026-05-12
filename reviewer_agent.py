@@ -1,5 +1,6 @@
 import os
 from typing import TypedDict
+from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, END
 from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
@@ -18,6 +19,11 @@ class AgentState(TypedDict):
     test_results: str
     fix_attempts: int
     status: str # "PASS", "FAIL"
+
+# NEW: Define the expected structured JSON output for fixes
+class FixResponse(BaseModel):
+    file_path: str = Field(description="The exact relative path of the file to fix (e.g., mcp-test-repo/calc.py)")
+    code: str = Field(description="The complete, fully fixed code to overwrite the file")
 
 llm = ChatOpenAI(model="gpt-4o", temperature=0)
 
@@ -42,12 +48,22 @@ def test_code_node(state: AgentState):
 
 def fix_code_node(state: AgentState):
     print(f"--- [NODE] FIXING CODE (Attempt {state.get('fix_attempts', 0) + 1}) ---")
-    prompt = f"Tests failed:\n{state['test_results']}\n\nProvide ONLY the full fixed code for calc.py inside triple backticks."
-    response = llm.invoke(prompt)
     
-    # Corrected extraction logic: split on one line to avoid SyntaxError
-    code = response.content.split("```python")[-1].split("```")[0].strip()
-    write_to_file("mcp-test-repo/calc.py", code)
+    # NEW: Bind the LLM to the Pydantic model to guarantee a structured JSON response
+    structured_llm = llm.with_structured_output(FixResponse)
+    
+    prompt = f"""Tests failed:
+{state['test_results']}
+
+Based on the failed tests and the initial diff, identify which file needs to be fixed.
+Provide the exact file path and the full, corrected code to overwrite it."""
+    
+    # Invoke now returns a validated FixResponse object instead of a raw text string
+    response = structured_llm.invoke(prompt)
+    
+    # Dynamically pass the AI-selected file path to the MCP tool
+    print(f"--- AI chose to fix: {response.file_path} ---")
+    write_to_file(response.file_path, response.code)
     
     return {"fix_attempts": state.get('fix_attempts', 0) + 1}
 
@@ -87,7 +103,7 @@ app = workflow.compile()
 if __name__ == "__main__":
     inputs = {
         "repo_name": "saitejapoluka249/mcp-test-repo", 
-        "pr_number": 1,                               
+        "pr_number": 2,                               
         "fix_attempts": 0
     }
     app.invoke(inputs)
