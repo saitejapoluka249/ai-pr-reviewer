@@ -47,7 +47,6 @@ def fetch_pr_node(state: AgentState):
     setup_status = setup_workspace(state['repo_name'], state['pr_number'])
     print(f"--- {setup_status} ---")
     
-    # NEW: Stop execution immediately if git checkout fails
     if "Error" in setup_status:
         raise RuntimeError(f"CRITICAL ERROR: Failed to prepare workspace. Agent stopped. Details: {setup_status}")
     
@@ -69,9 +68,6 @@ def read_direct_files_node(state: AgentState):
         filenames = []
     
     repo_dir = state['repo_name'].split('/')[-1]
-    
-    # FIX: We must start with an EMPTY string here every time we loop!
-    # If we don't clear this out, the AI grades the old broken code forever.
     contents = "" 
     
     for f in filenames:
@@ -85,8 +81,6 @@ def static_review_node(state: AgentState):
     print("\n--- [NODE] AI STATIC CODE REVIEW ---")
     structured_llm = llm.with_structured_output(ReviewDecision)
     
-    # FIX: We removed the old PR diff from this prompt. 
-    # The AI is now strictly instructed to ONLY grade the current file contents.
     prompt = f"""You are an expert code reviewer.
     Review the CURRENT full contents of these files for any bugs, logical errors, or bad coding practices:
     
@@ -114,7 +108,6 @@ def test_code_node(state: AgentState):
     else:
         test_status = "PASS"
         
-    # Final status requires BOTH tests to pass AND the static review to pass
     static_status = state.get('static_status', 'PASS')
     final_status = "FAIL" if (test_status == "FAIL" or static_status == "FAIL") else "PASS"
         
@@ -129,16 +122,12 @@ def gather_context_node(state: AgentState):
 Test logs: {state['test_results']}
 Review feedback: {state.get('static_feedback', '')}
 
-Initial PR Diff:
-{state['diff']}
-
 We already read the modified files. Based on the logs, do you need to read any OTHER files to understand ALL the bugs? Return their exact paths starting with {repo_dir}/"""
 
     response = structured_llm.invoke(prompt)
     
     contents = state.get('file_contents', '')
     for path in response.files_to_read:
-        # Only read if we haven't already read it
         if path not in contents:
             print(f"--- AI is actively reading: {path} ---")
             contents += f"\n--- Contents of {path} ---\n{read_local_file(path)}\n"
@@ -161,7 +150,6 @@ Static Review Feedback (Style & Bugs):
 Here is the full context of the files:
 {state.get('file_contents', 'No additional files read.')}
 
-The repository folder is: {repo_dir}/
 Identify ALL files that contain bugs or style issues. Provide a list of fixes.
 Each fix must include the exact file path (starting with {repo_dir}/) and the full, corrected code."""
     
@@ -173,14 +161,17 @@ Each fix must include the exact file path (starting with {repo_dir}/) and the fu
     
     return {"fix_attempts": state.get('fix_attempts', 0) + 1}
 
+# NEW NODE: Explicitly separated the push logic from the comment logic
+def push_node(state: AgentState):
+    print("\n--- [NODE] PUSHING FIXED CODE TO GITHUB ---")
+    push_status = push_fixed_code(state['repo_name'], state['pr_number'], "🤖 AI Auto-Fix: Applied style/test fixes")
+    print(f"--- {push_status} ---")
+    return {}
+
 def comment_node(state: AgentState):
-    print("\n--- [NODE] FINALIZING REVIEW & SYNCING ---")
+    print("\n--- [NODE] POSTING FINAL COMMENT ---")
     
     if state.get('fix_attempts', 0) > 0 and state['status'] == "PASS":
-        print("--- Pushing fixed code to GitHub ---")
-        push_status = push_fixed_code(state['repo_name'], state['pr_number'], "🤖 AI Auto-Fix: Applied style/test fixes")
-        print(f"--- {push_status} ---")
-        
         msg = f"✅ **AI Review: AUTONOMOUSLY CLEANED & PUSHED**\n\n"
         msg += f"*Note: The AI identified areas for improvement, applied fixes, verified tests, and pushed the updates.*\n\n"
         msg += f"**Original Analysis:**\n{state['analysis']}\n\n**Final Checks Passed!**"
@@ -206,9 +197,9 @@ workflow.add_node("static_review", static_review_node)
 workflow.add_node("test", test_code_node)
 workflow.add_node("gather_context", gather_context_node)
 workflow.add_node("fix", fix_code_node)
+workflow.add_node("push", push_node) # REGISTER NEW NODE
 workflow.add_node("comment", comment_node)
 
-# Wiring the Hybrid Loop
 workflow.set_entry_point("fetch_pr")
 workflow.add_edge("fetch_pr", "analyze")
 workflow.add_edge("analyze", "read_files")
@@ -216,23 +207,29 @@ workflow.add_edge("read_files", "static_review")
 workflow.add_edge("static_review", "test")
 
 def route_after_test(state: AgentState):
+    # If code changed and it passes both static review & pytest -> Route to Push
+    if state["status"] == "PASS" and state.get("fix_attempts", 0) > 0:
+        return "push"
+    # If code was perfectly fine to begin with OR it failed 2 attempts -> Route to Comment
     if state["status"] == "PASS" or state.get("fix_attempts", 0) >= 2:
         return "comment"
+    # Otherwise -> Gather Context & Fix
     return "gather_context"
 
-workflow.add_conditional_edges("test", route_after_test, {"comment": "comment", "gather_context": "gather_context"})
+workflow.add_conditional_edges("test", route_after_test, {"push": "push", "comment": "comment", "gather_context": "gather_context"})
 workflow.add_edge("gather_context", "fix") 
-
-# Loop back to reading files so the static reviewer and tests can evaluate the NEW code
 workflow.add_edge("fix", "read_files") 
+
+# Ensure push connects to comment after finishing
+workflow.add_edge("push", "comment")
 workflow.add_edge("comment", END)
 
 memory = MemorySaver()
 
 app = workflow.compile(
     checkpointer=memory,
-    # We removed "fix" so it only pauses before the final GitHub comment/push
-    interrupt_before=["comment"]
+    # NOW SET TO INTERRUPT BEFORE BOTH PUSH AND COMMENT
+    interrupt_before=["push", "comment"]
 )
 
 # 4. Execution
@@ -241,7 +238,7 @@ if __name__ == "__main__":
     
     inputs = {
         "repo_name": "saitejapoluka249/mcp-test-repo", 
-        "pr_number": 2,                                
+        "pr_number": 2, # Ensure this is an Open PR number                               
         "fix_attempts": 0
     }
     
@@ -264,5 +261,5 @@ if __name__ == "__main__":
             snapshot = app.get_state(thread_config)
             next_steps = snapshot.next
         else:
-            print("--- 🛑 Execution stopped. ---")
+            print("--- 🛑 Execution stopped by human. ---")
             break

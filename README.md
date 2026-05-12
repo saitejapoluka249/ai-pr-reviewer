@@ -16,7 +16,7 @@ The orchestration layer manages the **AgentState**, a short-term memory that tra
 
 - **Structured Outputs**: Using Pydantic models to ensure the AI returns exact JSON data for multi-file fixes and context requests.
 - **Cyclical Self-Healing**: The graph loops through fixing and testing until both the static review and dynamic tests pass.
-- **Human-in-the-Loop (HITL)**: Interactive checkpoints that pause execution for human approval before dangerous actions like posting public comments or pushing code.
+- **Human-in-the-Loop (HITL)**: Interactive checkpoints that pause execution for explicit human approval before any destructive or public actions are taken (specifically before pushing code to the repository or posting public comments).
 
 ### The "Hands" (Model Context Protocol - MCP)
 
@@ -48,7 +48,8 @@ MCP acts as the bridge between the AI and the local system, providing specialize
 5. **Dynamic Test**: Triggers a local `pytest` execution to verify code health mathematically.
 6. **Gather Context (Conditional)**: If tests fail, the AI autonomously decides which _additional_ files to read to debug the failure.
 7. **Fix Code (Conditional)**: The agent generates code patches and overwrites the files locally to fix any test failures or static review feedback. Loops back to Step 3.
-8. **Comment & Sync**: Summarizes the journey, posts a public review to GitHub, and automatically commits and pushes the fixed code.
+8. **Push Code (HITL)**: Once both the static review and tests pass, the system pauses for human approval. If granted, it automatically commits and pushes the fixed code to the remote branch.
+9. **Comment (HITL)**: Pauses for final human approval, then summarizes the entire journey and posts a public review/status update to the GitHub PR.
 
 ---
 
